@@ -23,6 +23,8 @@ REST_FRAMEWORK = {
 
 대신 Token Authentication 방법을 사용한다.
 
+`INSTALLED_APPS`에 `rest_framework.authtoken`을 추가 후 migrate
+
 ```
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
