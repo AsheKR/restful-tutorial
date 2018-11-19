@@ -911,3 +911,156 @@ class HighScoreSerializer(serializers.BaseSerializer):
     def create(self, validated_data):
         return HighScore.objects.create(**validated_data)
 ```
+
+## Creating new base classes
+
+`BaseSerializer`클래스는 특정 serializer 스타일을 처리하거나 대체 저장 백엔드와 통합하기 위해 새 generic serializer 클래스를 구현하려는 경우에도 유용하다.
+다음 클래스는 임의의 객체를 기본 자료형으로 강제 변환할 수 있는 일반 serializer 컨버터의 예이다.
+
+```python
+class ObjectSerializer(serializers.BaseSerializer):
+    """
+    A read-only serializer that coerces arbitrary complex objects
+    into primitive representations.
+    """
+    def to_representation(self, obj):
+        for attribute_name in dir(obj):
+            attribute = getattr(obj, attribute_name)
+            if attribute_name('_'):
+                # Ignore private attributes.
+                pass
+            elif hasattr(attribute, '__call__'):
+                # Ignore methods and other callables.
+                pass
+            elif isinstance(attribute, (str, int, bool, float, type(None))):
+                # Primitive types can be passed through unmodified.
+                output[attribute_name] = attribute
+            elif isinstance(attribute, list):
+                # Recursively deal with items in lists.
+                output[attribute_name] = [
+                    self.to_representation(item) for item in attribute
+                ]
+            elif isinstance(attribute, dict):
+                # Recursively deal with items in dictionaries.
+                output[attribute_name] = {
+                    str(key): self.to_representation(value)
+                    for key, value in attribute.items()
+                }
+            else:
+                # Force anything else to its string representation.
+                output[attribute_name] = str(attribute)
+```
+
+# Advanced Serializer Usage
+
+## Overriding serialization and deserialization behavior
+
+serializer 클래스의 serialization, deserialization 또는 유효성 검사를 변경해야하는 경우 `.to_representation()` 또는 `.to_internal_value()` 메서드를 재정의해야한다.
+유용한 이유는 다음과 같다.
+
+- 새로운 serializer Base Class에 대한 새로운 동작을 추가
+- 기존 클래스의 동작을 약간 수정
+- 많은 양의 데이터를 반환하며 자주 액세스 되는 API 엔드포인트의 serializer 성능 향상
+
+`to_representation(self, obj)`
+
+serializer가 필요한 객체 인스턴스를 가져와서 표현을 반환해야한다. 일반적으로 이것은 내장 파이썬 데이터 유형의 구조를 반환하는 것을 의미한다. 처리 할 수 있는 정확한 유형은 API에 대해 구성한 렌더링 클래스에 따라 다르다.
+
+`to_internal_value(self, data)`
+
+검증되지 않은 데이터를 입력받아 `serializer.validated_data`로 사용할 수 있는 유효성 검사된 데이터를 반환해야한다. serializer 클래스에서 `.save()`가 호출되면 반환 값도 `.create()` 또는 `.update()`로 전달된다.
+유효성 검사가 실패하면 메서드는 `serializers.ValidationError`를 발생시켜야한다. 일반적으로 여기에 있는 `errors`인수는 필드 이름을 오류 메세지에 매핑하는 dict이다.
+이 메서드에 전달된 `data`인수는 일반적으로 `request.data`의 값이므로, 제공하는 데이터 유형은 API에 대해 구성한 파서 클래스에 따라 다르다.
+
+## Serializer Inheritance
+
+Django 폼과 마찬가지로 상속을 통해 serializer를 확장하고 다시 사용할 수 있다. 이를 통해 많은 수의 serializer에서 사용할 수 있는 부모 클래스의 공통 필드 또는 메서드 집합을 선언할 수 있다.
+
+```python
+class MyBaseSerializer(Serializer):
+    my_field = serializers.CharField()
+
+    def validate_my_field(self):
+        ...
+
+class MySerializer(MyBaseSerializer):
+    ...
+```
+
+django의 `Model`과 `ModelForm`클래스처럼, serializer의 내부 `Meta`클래스는 부모의 내부 `Meta`클래스를 상속받지 않는다. `Meta`클래스가 부모 클래스에서 상속받기 원한다면 명시해야한다.
+
+
+```python
+class AccountSerializer(MyBaseSerializer):
+    class Meta(MyBaseSerializer.Meta):
+        model = Account
+```
+
+일반적으로 내부 메타 클래스에서는 상속을 사용하지 않고 모든 옵션을 명시적으로 선언하는 것이 좋다.
+또한 다음과 같은 주의사항이 serializer 상속에 적용된다.
+
+- 일반적인 Python 이름 해석 규칙이 적용된다. `Meta` 내부 클래스를 선언하는 여러 Base Class가 있는 경우, 첫번째 클래스만 사용된다. 이것은 자식의 메타가 존재한다면 자식의 메타를 의미하고, 그렇지 않으면 부모의 메타를 의미한다.
+- 하위 클래스에서 이름을 없음으로 설정하여 부모 클래스에서 상속된 `field`를 선언으로 제거할 수 있다.
+
+
+```python
+class MyBaseSerializer(ModelSerializer):
+    my_field = serializers.CharField()
+
+class MySerializer(MyBaseSerializer):
+    my_field = None
+```
+
+그러나 이 방법을 사용하는 경우에만 상위 클래스에 의해 선언적으로 정의 된 필드에서 선택 해제 할 수 있다. `ModelSerializer`가 디폴트 필드를 생성하는 것을 막지는 않는다. 기본 필드에서 선택 해제하려면 (Specifying which fields to include)를 참조하라.
+
+## Dynamically modifying fields
+
+serializer가 초기화되면 serializer에서 설정된 필드 dict에 `.fields` 특성을 사용하여 액세스할 수 있다. 이 속성에 액세스하고 수정하면 serializer 컨버터를 동적으로 수정할 수 있다.
+`fields`인수를 직접 수정하면 serializer 선언 시점이 아닌 런타임시 serializer 필드의 인수 변경과 같은 흥미로운 작업을 수행할 수 있다.
+
+### Example
+
+예를 들어, serializer에서 초기화할 때 사용할 필드를 설정하려면 다음과 같이 serializer 클래스를 만들 수 있다.
+
+```python
+class DynamicFieldsModelSerializer(serializers.ModelSerializer):
+    """
+    A ModelSerializer that takes an additional `fields` argument that
+    controls which fields should be displayed.
+    """
+
+    def __init__(self, *args, **kwargs):
+        # Don't pass the 'fields' arg up to the superclass
+        fields = kwargs.pop('fields', None)
+
+        # Instantiate the superclass normally
+        super(DynamicFieldsModelSerializer, self).__init__(*args, **kwargs)
+
+        if fields is not None:
+            # Drop any fields that are not specified in the `fields` argument.
+            allowed = set(fields)
+            existing = set(self.fields.keys())
+            for field_name in existing - allowed:
+                self.fields.pop(field_name)
+```
+
+이렇게 하면 다음을 수행할 수 있다.
+
+```python
+class UserSerializer(DynamicFieldsModelSerializer):
+  class Meta:
+    model = User
+    fields = ('id', 'username', 'email')
+
+print UserSerializer(user)
+{'id': 2, 'username': 'jonwatts', 'email': 'jon@example.com'}
+
+print UserSerializer(user, fields=('id', 'email'))
+{'id': 2, 'email': 'jon@example.com'}
+```
+
+## Customizing The Default Fields
+
+REST 프레임워크2에서는 개발자가 `ModelSeirlizer`클래스가 기본 필드 set을 자동으로 생성하는 방법을 재정의할 수 있는 API를 제공했다.
+이 API에서는 `.get_field()`, `.get_pk_field()`와 그 외의 메소드가 포함되어있다.
+하지만 serializer가 근본적으로 3.0으로 다시 디자인되었기 때문에 이 API는 더이상 존재하지 않습니다. 생성된 필드는 여전히 수정할 수 있지만 소스코드를 참조해야하며, 변경사항이 API의 비공개 비트에 해당하면 변경될 수 있음을 알고있어야한다.
